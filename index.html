@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AFRIBOT</title>
+  <style>
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #171c2d 0%, #070a15 55%, #020409 100%);
+      color: #e8f1ff;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+    }
+    #gameContainer {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+    #gameContainer canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      -webkit-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+      touch-action: none;
+    }
+    .ui-overlay {
+      position: absolute;
+      z-index: 10;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="gameContainer"></div>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <script>
+    const gameState = {
+      currentMission: 0,
+      score: 0,
+      battleSuccess: false,
+      missions: [
+        {
+          title: "Build Scout Car",
+          instruction: "Cadet, your scout bot requires wheels and a battery before deployment.",
+          required: ["battery", "wheels"],
+          robotType: "Scout Car",
+          difficulty: "Easy",
+          reward: 100,
+          objective: "avoidMines"
+        },
+        {
+          title: "Build Defense Bot",
+          instruction: "Excellent work. Your Defense Bot needs servo, LED, and sensor systems.",
+          required: ["servo", "led", "sensor"],
+          robotType: "Defense Bot",
+          difficulty: "Medium",
+          reward: 200,
+          objective: "destroyDrone"
+        },
+        {
+          title: "Build Surveillance Drone",
+          instruction: "Cadet, your drone must carry battery, sensor, wiring, and servo systems.",
+          required: ["battery", "sensor", "wiring", "servo"],
+          robotType: "Surveillance Drone",
+          difficulty: "Hard",
+          reward: 300,
+          objective: "scanBase"
+        }
+      ],
+      partDefinitions: [
+        { id: "arduino", label: "Arduino", description: "Microcontroller brain of the robot.", color: 0x3a5f9e },
+        { id: "servo", label: "Servo Motor", description: "Servo Motor — controls robotic movement and rotation.", color: 0x74b7ff },
+        { id: "sensor", label: "Ultrasonic Sensor", description: "Ultrasonic sensor — detects distance to obstacles.", color: 0xffaf3d },
+        { id: "battery", label: "Battery", description: "Battery — supplies energy to your robot.", color: 0xff595e },
+        { id: "wheels", label: "Wheels", description: "Wheels — allow ground robots to roll and steer.", color: 0x7ce8a6 },
+        { id: "led", label: "LEDs", description: "LEDs — show robot status with light signals.", color: 0xd3f261 },
+        { id: "wiring", label: "Wires", description: "Wiring — connects sensors, motors, and power.", color: 0xa368ff }
+      ],
+      placedParts: [],
+      soundOn: true
+    };
+
+    const soundEngine = {
+      context: null,
+      loopOsc: null,
+      loopGain: null,
+      init() {
+        if (this.context) return;
+        this.context = new (window.AudioContext || window.webkitAudioContext)();
+        document.addEventListener('pointerdown', () => {
+          if (this.context.state === 'suspended') {
+            this.context.resume();
+          }
+        }, { once: true });
+      },
+      stopLoop() {
+        if (this.loopGain) {
+          try {
+            this.loopGain.gain.cancelScheduledValues(this.context.currentTime);
+            this.loopGain.gain.setValueAtTime(0, this.context.currentTime);
+          } catch (e) {}
+          this.loopGain = null;
+        }
+        if (this.loopOsc) {
+          try {
+            this.loopOsc.stop();
+          } catch (e) {}
+          this.loopOsc.disconnect();
+          this.loopOsc = null;
+        }
+      },
+      startLoop(type) {
+        if (!gameState.soundOn) return;
+        this.init();
+        this.stopLoop();
+        if (!this.context) return;
+        const freq = type === 'menu' ? 110 : type === 'garage' ? 84 : type === 'battle' ? 62 : type === 'final' ? 132 : 100;
+        const osc = this.context.createOscillator();
+        const gain = this.context.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = freq;
+        gain.gain.value = 0.02;
+        osc.connect(gain).connect(this.context.destination);
+        osc.start();
+        this.loopOsc = osc;
+        this.loopGain = gain;
+      },
+      startLoopForScene(sceneKey) {
+        const sceneName = sceneKey.toLowerCase();
+        if (sceneName.includes('menu')) {
+          this.startLoop('menu');
+        } else if (sceneName.includes('garage')) {
+          this.startLoop('garage');
+        } else if (sceneName.includes('battle')) {
+          this.startLoop('battle');
+        } else if (sceneName.includes('final')) {
+          this.startLoop('final');
+        } else {
+          this.startLoop('menu');
+        }
+      },
+      playTone(freq, duration = 0.12, type = 'sine', volume = 0.24, when = 0) {
+        if (!gameState.soundOn) return;
+        this.init();
+        if (!this.context) return;
+        const now = this.context.currentTime + when;
+        const osc = this.context.createOscillator();
+        const gain = this.context.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(volume, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+        osc.connect(gain).connect(this.context.destination);
+        osc.start(now);
+        osc.stop(now + duration + 0.02);
+      },
+      playEffect(name) {
+        if (!gameState.soundOn) return;
+        this.init();
+        switch (name) {
+          case 'click':
+            this.playTone(660, 0.08, 'square', 0.16);
+            break;
+          case 'menuEnter':
+            this.playTone(440, 0.16, 'triangle', 0.16);
+            this.playTone(550, 0.1, 'triangle', 0.1, 0.05);
+            break;
+          case 'garageEnter':
+            this.playTone(330, 0.14, 'sine', 0.16);
+            break;
+          case 'battleStart':
+            this.playTone(220, 0.12, 'sawtooth', 0.18);
+            break;
+          case 'success':
+            this.playTone(880, 0.16, 'triangle', 0.18);
+            this.playTone(660, 0.12, 'triangle', 0.14, 0.1);
+            break;
+          case 'error':
+            this.playTone(160, 0.16, 'sine', 0.16);
+            this.playTone(120, 0.12, 'sine', 0.12, 0.08);
+            break;
+          case 'hit':
+            this.playTone(420, 0.1, 'square', 0.18);
+            break;
+          case 'damage':
+            this.playTone(180, 0.12, 'triangle', 0.18);
+            break;
+          case 'victory':
+            this.playTone(880, 0.18, 'triangle', 0.2);
+            this.playTone(1040, 0.12, 'triangle', 0.16, 0.12);
+            break;
+          case 'final':
+            this.playTone(330, 0.18, 'triangle', 0.16);
+            break;
+          case 'toggleOff':
+            this.playTone(120, 0.12, 'sine', 0.18);
+            break;
+          case 'toggleOn':
+            this.playTone(520, 0.12, 'sine', 0.18);
+            break;
+          default:
+            this.playTone(440, 0.08, 'sine', 0.12);
+        }
+      }
+    };
+
+    const responsive = {
+      isSmall() { return window.innerWidth <= 700 || window.innerHeight <= 500; },
+      uiScale() { const w = window.innerWidth; return Math.max(0.85, Math.min(1.6, w/900)); }
+    };
+
+   class BootScene extends Phaser.Scene {
+      constructor() {
+        super("BootScene");
+      }
+      preload() {
+        const centerX = this.scale.width / 2;
+        const centerY = this.scale.height / 2;
+        const progressBar = this.add.rectangle(centerX - 200, centerY + 30, 0, 28, 0x4b7bc7).setOrigin(0, 0.5);
+        this.add.rectangle(centerX - 202, centerY + 30, 404, 32, 0x0d1330).setOrigin(0, 0.5);
+        this.loadingText = this.add.text(centerX, centerY - 40, "Loading AFRIBOT Academy...", {
+          font: "22px Arial",
+          fill: "#ffffff"
+        }).setOrigin(0.5);
+        this.logoMissing = false;
+        this.load.on("progress", (value) => {
+          progressBar.width = 400 * value;
+        });
+        this.load.on("complete", () => {
+          this.loadingText.setText("Ready for launch!");
+        });
+        this.load.on("loaderror", (file) => {
+          this.logoMissing = true;
+          this.loadingText.setText("Logo not found. Using default theme.");
+        });
+        this.load.image("logo", "assets/logo.png");
+      }
+      create() {
+        const w = this.scale.width;
+        const h = this.scale.height;
+        this.add.rectangle(0, 0, w, h, 0x080b17).setOrigin(0);
+        if (!this.logoMissing) {
+          this.add.image(w / 2, h * 0.35, "logo").setOrigin(0.5).setDisplaySize(Math.min(360, w * 0.5), Math.min(140, h * 0.18));
+        } else {
+          this.add.text(w / 2, h * 0.35, "AFRIBOT", { font: "48px Arial", fill: "#9fe1ff", fontStyle: "bold" }).setOrigin(0.5);
+        }
+        this.add.text(w / 2, h * 0.6, "Loading AFRIBOT Academy...", {
+          font: "22px Arial",
+          fill: "#ffffff"
+        }).setOrigin(0.5);
+        this.add.text(w / 2, h * 0.68, "Ready for launch!", {
+          font: "18px Arial",
+          fill: "#4b7bc7"
+        }).setOrigin(0.5);
+        this.time.delayedCall(1200, () => {
+          this.scene.start("MenuScene");
+        });
+      }
+    }
+
+    class MenuScene extends Phaser.Scene {
+      constructor() {
+        super("MenuScene");
+        this.progressBar = null;
+        this.loadingText = null;
+        this.logoMissing = false;
+      }
+
+      preload() {
+        this.load.image("logo", "assets/logo.png");
+      }
+      create() {
+        soundEngine.stopLoop();
+        soundEngine.playEffect('menuEnter');
+        soundEngine.startLoopForScene('MenuScene');
+        const w = this.scale.width;
+        const h = this.scale.height;
+        this.add.rectangle(0, 0, w, h, 0x080b17).setOrigin(0);
+        const logoY = h * 0.30;
+        if (!this.logoMissing) {
+          this.add.image(this.cameras.main.centerX, logoY, "logo").setOrigin(0.5).setDisplaySize(360, 140);
+        } else {
+          this.add.text(this.cameras.main.centerX, logoY, "AFRIBOT", { font: "48px Arial", fill: "#9fe1ff", fontStyle: "bold" }).setOrigin(0.5);
+        }
+        this.add.text(w / 2, logoY + 100, "AFRIBOT", { font: "28px Arial", fill: "#b0d9ff" }).setOrigin(0.5);
+        const startButton = this.add.rectangle(w / 2, logoY + 190, 260, 70, 0x52c0ff).setInteractive({ useHandCursor: true });
+        const startText = this.add.text(w / 2, logoY + 190, "Start Mission", { font: "24px Arial", fill: "#071b31" }).setOrigin(0.5);
+        startButton.on("pointerover", () => {
+          startButton.setFillStyle(0x7de0ff);
+        });
+        startButton.on("pointerout", () => {
+          startButton.setFillStyle(0x52c0ff);
+        });
+        startButton.on("pointerdown", () => {
+          soundEngine.playEffect('click');
+          this.scene.start("GarageScene");
+        });
+        const uiScale = responsive.uiScale();
+        if (uiScale !== 1) {
+          startButton.setScale(uiScale);
+          startText.setScale(uiScale);
+        }
+        const soundButton = this.add.text(w - 30, 30, gameState.soundOn ? "🔊" : "🔇", { font: `${Math.round(26*uiScale)}px Arial`, fill: "#ffffff" }).setOrigin(1, 0).setInteractive();
+        soundButton.on("pointerdown", () => {
+          gameState.soundOn = !gameState.soundOn;
+          soundButton.setText(gameState.soundOn ? "🔊" : "🔇");
+          soundEngine.playEffect(gameState.soundOn ? 'toggleOn' : 'toggleOff');
+          if (gameState.soundOn) {
+            soundEngine.startLoopForScene('MenuScene');
+          } else {
+            soundEngine.stopLoop();
+          }
+        });
+      }
+    }
+
+    class GarageScene extends Phaser.Scene {
+      constructor() {
+        super("GarageScene");
+      }
+      create() {
+        soundEngine.stopLoop();
+        soundEngine.playEffect('garageEnter');
+        soundEngine.startLoopForScene('GarageScene');
+        const w = this.scale.width;
+        const h = this.scale.height;
+        this.add.rectangle(0, 0, w, h, 0x08111f).setOrigin(0);
+        this.add.rectangle(18, 18, Math.min(310, w*0.32), Math.min(684, h*0.95), 0x0d1630).setOrigin(0).setStrokeStyle(2, 0x386ea8);
+        this.add.text(178, 30, "Toolbox", { font: "24px Arial", fill: "#9fe1ff" }).setOrigin(0.5);
+        this.add.rectangle(340, 18, 420, 684, 0x0b2540).setOrigin(0).setStrokeStyle(2, 0x3d5ba1);
+        this.add.text(550, 30, "Robot Frame", { font: "24px Arial", fill: "#9fe1ff" }).setOrigin(0.5);
+        this.add.rectangle(770, 18, 310, 684, 0x0d1630).setOrigin(0).setStrokeStyle(2, 0x386ea8);
+        this.add.text(930, 30, "Robot Types", { font: "24px Arial", fill: "#9fe1ff" }).setOrigin(0.5);
+        this.add.rectangle(770, 250, 310, 170, 0x0d1630).setOrigin(0).setStrokeStyle(2, 0x386ea8);
+        this.add.text(882, 266, "AI Mentor", { font: "20px Arial", fill: "#9fe1ff" }).setOrigin(0.5);
+        this.add.rectangle(770, 436, 310, 266, 0x0d1630).setOrigin(0).setStrokeStyle(2, 0x386ea8);
+        this.add.text(882, 452, "Mission Control", { font: "20px Arial", fill: "#5fe1ff" }).setOrigin(0.5);
+
+        this.mentorPanel = this.add.rectangle(780, 286, 300, 110, 0x0a1220).setOrigin(0).setStrokeStyle(2, 0x3e6cd5);
+        this.mentorText = this.add.text(790, 300, "", { font: "18px Arial", fill: "#d7ebff", wordWrap: { width: 280 } });
+        this.tooltipText = this.add.text(30, 630, "Hover a component for details.", { font: "18px Arial", fill: "#c7deff" });
+        this.checklistText = this.add.text(790, 500, "", { font: "16px Arial", fill: "#c7deff", wordWrap: { width: 180 } });
+        this.progressBar = this.add.rectangle(782, 700, 260, 18, 0x142a48).setOrigin(0, 0);
+        this.progressFill = this.add.rectangle(782, 700, 0, 18, 0x65e6ff).setOrigin(0, 0);
+        this.progressLabel = this.add.text(782, 700, "Progress: 0 / 0", { font: "16px Arial", fill: "#9fe1ff" });
+
+        this.robotCards = [];
+        this.missionCards = [
+          { name: "Scout Car", y: 80 },
+          { name: "Defense Bot", y: 145 },
+          { name: "Surveillance Drone", y: 210 }
+        ];
+        this.missionCards.forEach((card) => {
+          const rect = this.add.rectangle(790, card.y, 260, 50, 0x101c31, 0.8).setOrigin(0);
+          const text = this.add.text(920, card.y + 25, card.name, { font: "18px Arial", fill: "#d5efff" }).setOrigin(0.5);
+          this.robotCards.push({ rect, text, name: card.name });
+        });
+
+        const slotDefinitions = [
+          { name: "Controller", accept: ["arduino"], x: 450, y: 210 },
+          { name: "Powerpack", accept: ["battery"], x: 630, y: 210 },
+          { name: "Actuator", accept: ["servo", "wheels"], x: 450, y: 330 },
+          { name: "Signal", accept: ["led"], x: 630, y: 330 },
+          { name: "Sensor", accept: ["sensor"], x: 540, y: 450 },
+          { name: "Wiring", accept: ["wiring"], x: 540, y: 120 }
+        ];
+        this.slots = [];
+        slotDefinitions.forEach((slotData, index) => {
+          const slot = this.add.rectangle(slotData.x, slotData.y, 180, 58, 0x091325).setStrokeStyle(3, 0x3a81c1).setInteractive({ useHandCursor: true });
+          this.add.text(slotData.x, slotData.y, slotData.name, { font: "16px Arial", fill: "#9fe1ff", align: "center", wordWrap: { width: 170 } }).setOrigin(0.5);
+          slot.setData({ index, partId: null, occupied: false, accept: slotData.accept, partObj: null });
+          slot.on('pointerdown', () => this.removePartFromSlot(slot));
+          this.slots.push(slot);
+        });
+
+        const checkButton = this.add.rectangle(904, 650, 160, 50, 0x7bdc88).setInteractive({ useHandCursor: true });
+        this.add.text(904, 650, "Check Build", { font: "20px Arial", fill: "#071b31" }).setOrigin(0.5);
+        checkButton.on("pointerover", () => {
+          checkButton.setFillStyle(0x99eaa4);
+        });
+        checkButton.on("pointerout", () => {
+          checkButton.setFillStyle(0x7bdc88);
+        });
+        checkButton.on("pointerdown", () => {
+          soundEngine.playEffect('click');
+          this.validateMission();
+        });
+
+        this.partsGroup = this.add.group();
+        this.createParts();
+        this.loadMission();
+      }
+      createParts() {
+        const startX = 40;
+        const startY = 100;
+        const gapY = 80;
+        gameState.partDefinitions.forEach((part, index) => {
+          const y = startY + index * gapY;
+          const container = this.add.container(startX + 100, y);
+          const bg = this.add.rectangle(0, 0, 180, 58, part.color).setStrokeStyle(3, 0x0c1225);
+          const label = this.add.text(0, 0, part.label, { font: "16px Arial", fill: "#061525" }).setOrigin(0.5);
+          container.add([bg, label]);
+          container.setSize(180, 58);
+          container.setInteractive({ useHandCursor: true, draggable: true });
+          container.partId = part.id;
+          container.partLabel = part.label;
+          container.partDescription = part.description;
+          container.originalX = container.x;
+          container.originalY = container.y;
+          container.on("pointerover", () => {
+            this.tooltipText.setText(part.description);
+          });
+          container.on("pointerout", () => {
+            this.tooltipText.setText("Hover a component for details.");
+          });
+          container.on("dragstart", () => {
+            container.setScale(1.05);
+          });
+          container.on("drag", (pointer, dragX, dragY) => {
+            container.x = dragX;
+            container.y = dragY;
+          });
+          container.on("dragend", () => {
+            container.setScale(1);
+            this.attemptSnap(container);
+          });
+          this.partsGroup.add(container);
+        });
+      }
+
+      configureSlotsForMission(mission) {
+        // Always show core frame slots; visually highlight those required by the mission
+        const required = mission.required;
+        this.slots.forEach((slot) => {
+          const accepts = slot.getData('accept') || [];
+          const requiredHere = accepts.some((a) => required.includes(a));
+          slot.setVisible(true);
+          // highlight required slots
+          if (requiredHere) {
+            slot.setFillStyle(0x091325);
+            slot.setStrokeStyle(4, 0x7be2ff);
+            slot.setAlpha(1);
+          } else {
+            slot.setFillStyle(0x091325);
+            slot.setStrokeStyle(2, 0x3a81c1);
+            slot.setAlpha(0.55);
+          }
+          // ensure the label text near the slot remains visible
+          this.children.list.forEach((child) => {
+            if (child.type === 'Text') {
+              const dx = Math.abs(child.x - slot.x);
+              const dy = Math.abs(child.y - (slot.y - 44));
+              if (dx < 60 && dy < 20) child.setVisible(true);
+            }
+          });
+          // reset data for slots
+          slot.setData({ index: slot.getData('index'), partId: null, occupied: false, accept: accepts });
+        });
+      }
+
+      loadMission() {
+        const mission = gameState.missions[gameState.currentMission];
+        gameState.placedParts = [];
+        // configure frame slots for this mission
+        this.configureSlotsForMission(mission);
+
+        this.partsGroup.getChildren().forEach((part) => {
+          part.x = part.originalX;
+          part.y = part.originalY;
+          part.visible = true;
+          part.setInteractive();
+        });
+        this.mentorText.setText(`${mission.title}\n${mission.instruction}`);
+        this.updateChecklist();
+        const progress = (gameState.currentMission / (gameState.missions.length - 1)) * 260;
+        this.progressFill.width = progress;
+        this.progressLabel.setText(`Progress: Mission ${gameState.currentMission + 1} / ${gameState.missions.length}`);
+        this.robotCards.forEach((card) => {
+          if (card.name === mission.robotType) {
+            card.rect.setFillStyle(0x2c84d8, 0.95);
+            card.text.setColor("#f7ffbc");
+          } else {
+            card.rect.setFillStyle(0x101c31, 0.8);
+            card.text.setColor("#d5efff");
+          }
+        });
+      }
+      updateChecklist(message) {
+        const mission = gameState.missions[gameState.currentMission];
+        const collected = gameState.placedParts.map((item) => item.partId);
+        let checklist = `${mission.title}\nRequired:\n`;
+        mission.required.forEach((part) => {
+          const found = collected.includes(part);
+          checklist += `${found ? "✔" : "✖"} ${part.charAt(0).toUpperCase() + part.slice(1)}\n`;
+        });
+        if (message) checklist += `\n${message}`;
+        this.checklistText.setText(checklist);
+      }
+      attemptSnap(part) {
+        const mission = gameState.missions[gameState.currentMission];
+        let snapped = false;
+        this.slots.forEach((slot) => {
+          if (!slot.visible) return;
+          if (!slot.getData("occupied") && Phaser.Geom.Rectangle.Contains(slot.getBounds(), part.x, part.y)) {
+            const accepts = slot.getData("accept") || [];
+            if (accepts.includes(part.partId)) {
+              snapped = true;
+              part.x = slot.x;
+              part.y = slot.y;
+              part.visible = false;
+              slot.setData({ partId: part.partId, occupied: true, partObj: part });
+              gameState.placedParts.push({ slotIndex: slot.getData("index"), partId: part.partId });
+              slot.setFillStyle(0x16456e);
+              slot.setStrokeStyle(4, 0x7be2ff);
+              this.updateChecklist("Correct placement!");
+            }
+          }
+        });
+        if (!snapped) {
+          this.flashInvalid(part);
+          part.x = part.originalX;
+          part.y = part.originalY;
+        }
+      }
+      flashInvalid(part) {
+        soundEngine.playEffect('error');
+        const invalidTint = this.add.rectangle(part.x, part.y, 260, 52, 0xff4b4b, 0.5).setOrigin(0.5);
+        this.time.delayedCall(400, () => invalidTint.destroy());
+        this.mentorText.setText("Warning: invalid placement or missing required component.");
+      }
+      removePartFromSlot(slot) {
+        if (!slot.getData('occupied')) {
+          return;
+        }
+        const part = slot.getData('partObj');
+        const partId = slot.getData('partId');
+        if (part) {
+          soundEngine.playEffect('click');
+          part.visible = true;
+          part.x = part.originalX;
+          part.y = part.originalY;
+          part.setInteractive({ useHandCursor: true, draggable: true });
+        }
+        slot.setData({ index: slot.getData('index'), partId: null, occupied: false, accept: slot.getData('accept'), partObj: null });
+        slot.setFillStyle(0x091325);
+        slot.setStrokeStyle(3, 0x3a81c1);
+        gameState.placedParts = gameState.placedParts.filter((item) => item.partId !== partId || item.slotIndex !== slot.getData('index'));
+        this.updateChecklist("Part removed from frame. You can re-place it.");
+      }
+      validateMission() {
+        const mission = gameState.missions[gameState.currentMission];
+        const placed = gameState.placedParts.map((item) => item.partId);
+        const missing = mission.required.filter((part) => !placed.includes(part));
+        if (missing.length > 0) {
+          this.mentorText.setText(`Warning: ${missing.join(", ")} missing. Complete the build.`);
+          this.flashError();
+          this.updateChecklist("Build incomplete. Add missing parts.");
+          return;
+        }
+        this.mentorText.setText("Excellent work. Build validated. Prepare for battle.");
+        soundEngine.playEffect('success');
+        gameState.score += mission.reward;
+        this.flashSuccess();
+        this.time.delayedCall(800, () => {
+          this.scene.start("BattleScene");
+        });
+      }
+      flashError() {
+        this.cameras.main.flash(200, 255, 80, 80);
+      }
+      flashSuccess() {
+        this.cameras.main.flash(200, 80, 255, 160);
+      }
+    }
+
+    class BattleScene extends Phaser.Scene {
+      constructor() {
+        super("BattleScene");
+      }
+       preload() {
+        // load any battle-specific assets here if needed
+        this.load.image("scout" ,"assets/scoutcar.png");
+        this.load.image("defensebot" ,"assets/defensebot.png");
+        this.load.image("drone" ,"assets/drone.jpg");
+      }
+      create() {
+        soundEngine.stopLoop();
+        soundEngine.playEffect('battleStart');
+        soundEngine.startLoopForScene('BattleScene');
+        let spriteKey = "scout"; // default
+        const mission = gameState.missions[gameState.currentMission];
+      if (mission.robotType === "Defense Bot") {
+       spriteKey = "defensebot";
+       }
+       else if (mission.robotType === "Surveillance Drone") {
+        spriteKey = "drone";
+       }
+
+        this.add.rectangle(0, 0, 1024, 720, 0x05101f).setOrigin(0);
+        this.add.text(40, 30, `Battle Simulation: ${mission.robotType}`, { font: "32px Arial", fill: "#9fe1ff" });
+        this.add.text(50, 270, "Robot Preview", { font: "20px Arial", fill: "#c4efff" });
+        this.add.rectangle(50, 290, 420, 220, 0x0d1831).setOrigin(0).setStrokeStyle(2, 0x3a5fa0);
+        this.robotSprite = this.add.image(260, 420, spriteKey).setScale(0.32).setDepth(1);
+        this.robotSprite.setInteractive({ useHandCursor: true });
+        this.robotSprite.on('pointerover', () => this.robotSprite.setTint(0x99ddff));
+        this.robotSprite.on('pointerout', () => this.robotSprite.clearTint());
+        this.tweens.add({
+          targets: this.robotSprite,
+          y: 428,
+          duration: 1000,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut'
+        });
+        this.tweens.add({
+          targets: this.robotSprite,
+          scale: 0.34,
+          duration: 1400,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut'
+        });
+        this.add.text(40, 80, mission.instruction, { font: "20px Arial", fill: "#d9efff", wordWrap: { width: 940 } });
+        this.playerHealth = 100;
+        this.enemyHealth = 100;
+        this.battleProgress = 0;
+        this.add.rectangle(50, 140, 420, 24, 0x0e1a2f).setOrigin(0);
+        this.playerHealthFill = this.add.rectangle(52, 142, 4.16 * this.playerHealth, 20, 0x6cff9b).setOrigin(0);
+        this.add.text(50, 120, "Robot Integrity", { font: "18px Arial", fill: "#c4efff" });
+        this.add.rectangle(50, 190, 420, 24, 0x0e1a2f).setOrigin(0);
+        this.enemyHealthFill = this.add.rectangle(52, 192, 4.16 * this.enemyHealth, 20, 0xff7d8d).setOrigin(0);
+        this.add.text(50, 170, "Enemy Threat", { font: "18px Arial", fill: "#c4efff" });
+        this.objectiveText = this.add.text(520, 140, "", { font: "22px Arial", fill: "#d7f7ff", wordWrap: { width: 420 } });
+        this.statusText = this.add.text(520, 220, "", { font: "20px Arial", fill: "#f0ffbc", wordWrap: { width: 420 } });
+
+        const actions = ["Engage", "Support", "Scan"];
+        const buttonWidth = 110;
+        const buttonSpacing = 26;
+        const startX = 78;
+        const buttonY = 620;
+        const buttonColors = [0x2f86ff, 0x44c06e, 0xffb84d];
+        const hoverColors = [0x67a8ff, 0x6ce085, 0xffd280];
+        this.actionButtons = actions.map((name, index) => {
+          const x = startX + index * (buttonWidth + buttonSpacing);
+          const button = this.add.rectangle(x, buttonY, buttonWidth, 52, buttonColors[index]).setOrigin(0, 0).setInteractive({ useHandCursor: true });
+          const label = this.add.text(x + buttonWidth / 2, buttonY + 26, name, { font: "20px Arial", fill: "#071b31" }).setOrigin(0.5);
+          button.on("pointerover", () => button.setFillStyle(hoverColors[index]));
+          button.on("pointerout", () => button.setFillStyle(buttonColors[index]));
+          button.on("pointerdown", () => {
+            soundEngine.playEffect('click');
+            this.handleBattleAction(name);
+          });
+          return button;
+        });
+
+        const uiScale = responsive.uiScale();
+        if (uiScale !== 1) {
+          this.actionButtons.forEach(btn => btn.setScale(uiScale));
+        }
+
+        this.enemyAreaX = 650;
+        this.enemyAreaY = 240;
+        this.enemyAreaWidth = 320;
+        this.enemyAreaHeight = 260;
+        this.enemyContainer = this.add.container(0, 0).setDepth(12);
+        this.enemyPulse = this.add.rectangle(this.enemyAreaX + this.enemyAreaWidth / 2, this.enemyAreaY + this.enemyAreaHeight / 2, this.enemyAreaWidth - 16, this.enemyAreaHeight - 16, 0xff4a4a, 0.14).setOrigin(0.5).setDepth(11);
+        this.enemyGraphics = this.add.graphics();
+        this.enemyLabel = this.add.text(this.enemyAreaX + this.enemyAreaWidth / 2, this.enemyAreaY + 18, "Enemy Presence", { font: "18px Arial", fill: "#ff9fa5" }).setOrigin(0.5).setDepth(13);
+        this.enemyFlash = this.add.rectangle(this.enemyAreaX, this.enemyAreaY, this.enemyAreaWidth, this.enemyAreaHeight, 0xff0000, 0).setOrigin(0).setDepth(14);
+        this.enemyContainer.add([this.enemyPulse, this.enemyGraphics, this.enemyLabel, this.enemyFlash]);
+        this.drawEnemyVisual(mission.robotType);
+        this.startEnemyWarningPulse();
+
+        this.setupObjective(mission.objective);
+        this.battleTimer = this.time.addEvent({ delay: 1400, callback: this.enemyAttack, callbackScope: this, loop: true });
+      }
+      setupObjective(objective) {
+        let color = "#44c06e";
+        if (objective === "avoidMines") {
+          this.objectiveText.setText("Objective: Avoid minefields while patrolling. Use Engage to steer clear.");
+          this.requiredClicks = 6;
+          this.progressTarget = 6;
+          color = "#2f86ff";
+        } else if (objective === "destroyDrone") {
+          this.objectiveText.setText("Objective: Destroy the enemy drone. Use Support to fire defense pulses.");
+          this.requiredClicks = 5;
+          this.progressTarget = 5;
+          color = "#44c06e";
+        } else {
+          this.objectiveText.setText("Objective: Scan the enemy base. Use Scan to complete the reconnaissance.");
+          this.requiredClicks = 7;
+          this.progressTarget = 7;
+          color = "#ffb84d";
+        }
+        this.objectiveText.setFill(color);
+        this.statusText.setText(`Progress: 0 / ${this.progressTarget}`);
+      }
+      drawEnemyVisual(robotType) {
+        const x = this.enemyAreaX;
+        const y = this.enemyAreaY;
+        const w = this.enemyAreaWidth;
+        const h = this.enemyAreaHeight;
+        this.enemyGraphics.clear();
+        this.enemyGraphics.fillStyle(0x14121b, 0.9).fillRoundedRect(x, y, w, h, 20);
+        this.enemyGraphics.lineStyle(3, 0xff5e5e).strokeRoundedRect(x, y, w, h, 20);
+
+        if (robotType === "Scout Car") {
+          this.enemyLabel.setText("Drone Swarm");
+          const centerX = x + w / 2;
+          const centerY = y + 140;
+          for (let i = 0; i < 6; i++) {
+            const angle = Phaser.Math.DegToRad(60 * i - 30);
+            const radius = 40 + (i % 2) * 20;
+            const dotX = centerX + Math.cos(angle) * radius;
+            const dotY = centerY + Math.sin(angle) * radius - 10;
+            this.enemyGraphics.fillStyle(0xff4a4a, 1).fillCircle(dotX, dotY, 12);
+            this.enemyGraphics.fillStyle(0xff9090, 1).fillTriangle(dotX - 10, dotY + 10, dotX + 10, dotY + 10, dotX, dotY - 14);
+          }
+          this.enemyGraphics.lineStyle(2, 0xff5e5e).strokeCircle(centerX, centerY, 50);
+          this.enemyGraphics.strokeCircle(centerX, centerY, 30);
+        } else if (robotType === "Defense Bot") {
+          this.enemyLabel.setText("Siege Walker");
+          const baseX = x + 120;
+          const baseY = y + 120;
+          this.enemyGraphics.fillStyle(0x421a20, 1).fillRect(baseX - 90, baseY - 60, 180, 120);
+          this.enemyGraphics.fillStyle(0xff5e5e, 1).fillRect(baseX - 50, baseY - 120, 100, 60);
+          this.enemyGraphics.fillStyle(0xff9090, 1).fillRect(baseX - 14, baseY - 112, 28, 32);
+          this.enemyGraphics.fillStyle(0xff5e5e, 1).fillRect(baseX - 100, baseY + 55, 40, 20);
+          this.enemyGraphics.fillRect(baseX + 60, baseY + 55, 40, 20);
+          this.enemyGraphics.lineStyle(4, 0xff5e5e).strokeLineShape(new Phaser.Geom.Line(baseX - 65, baseY - 10, baseX - 120, baseY + 60));
+          this.enemyGraphics.strokeLineShape(new Phaser.Geom.Line(baseX + 65, baseY - 10, baseX + 120, baseY + 60));
+          this.enemyGraphics.fillStyle(0xffa3a3, 1).fillCircle(baseX - 35, baseY - 70, 10);
+          this.enemyGraphics.fillCircle(baseX + 35, baseY - 70, 10);
+        } else {
+          this.enemyLabel.setText("Enemy Base");
+          const towerX = x + w / 2;
+          const towerY = y + 170;
+          this.enemyGraphics.fillStyle(0x321b2d, 1).fillRect(x + 20, y + 80, w - 40, 100);
+          this.enemyGraphics.fillStyle(0xff5e5e, 1).fillRect(towerX - 40, y + 35, 80, 120);
+          this.enemyGraphics.fillStyle(0xff9090, 1).fillCircle(towerX, y + 30, 18);
+          this.enemyGraphics.fillStyle(0xffffff, 1).fillRect(towerX - 4, y + 15, 8, 40);
+          this.enemyGraphics.lineStyle(2, 0xff5e5e).strokeLineShape(new Phaser.Geom.Line(towerX, y + 15, towerX, y + 60));
+          this.enemyGraphics.fillStyle(0xff4a4a, 1).fillCircle(towerX - 75, y + 60, 10);
+          this.enemyGraphics.fillCircle(towerX + 75, y + 60, 10);
+          this.enemyGraphics.lineStyle(2, 0xff9090).strokeCircle(towerX, y + 30, 28);
+          this.enemyGraphics.strokeCircle(towerX, y + 30, 40);
+          this.enemyGraphics.fillStyle(0xffcdcd, 1).fillTriangle(towerX - 16, y + 15, towerX + 16, y + 15, towerX, y - 8);
+        }
+      }
+      flashEnemyDamage() {
+        if (!this.enemyFlash) {
+          return;
+        }
+        this.enemyFlash.alpha = 0.45;
+        this.tweens.killTweensOf(this.enemyFlash);
+        this.tweens.add({
+          targets: this.enemyFlash,
+          alpha: 0,
+          duration: 220,
+          ease: 'Quad.easeOut'
+        });
+      }
+      shakeEnemy() {
+        if (!this.enemyContainer) {
+          return;
+        }
+        const originalX = this.enemyContainer.x;
+        this.tweens.killTweensOf(this.enemyContainer);
+        this.tweens.add({
+          targets: this.enemyContainer,
+          x: originalX + 12,
+          duration: 60,
+          yoyo: true,
+          repeat: 1,
+          ease: 'Sine.easeInOut'
+        });
+      }
+      playEnemyDestroyAnimation() {
+        if (!this.enemyContainer) {
+          return;
+        }
+        const centerX = this.enemyAreaX + this.enemyAreaWidth / 2;
+        const centerY = this.enemyAreaY + this.enemyAreaHeight / 2;
+        const explosion = this.add.graphics().setDepth(15);
+        this.tweens.addCounter({
+          from: 0,
+          to: 1,
+          duration: 500,
+          onUpdate: (tween) => {
+            const progress = tween.getValue();
+            explosion.clear();
+            explosion.fillStyle(0xff5e5e, 0.4 + progress * 0.35).fillCircle(centerX, centerY, 40 + progress * 80);
+            explosion.lineStyle(3, 0xffd3d3, 0.8).strokeCircle(centerX, centerY, 30 + progress * 70);
+          },
+          onComplete: () => {
+            explosion.destroy();
+          }
+        });
+        this.tweens.add({
+          targets: this.enemyContainer,
+          alpha: 0,
+          scale: 1.18,
+          duration: 500,
+          ease: 'Cubic.easeIn',
+          onComplete: () => {
+            this.enemyContainer.setVisible(false);
+          }
+        });
+      }
+      startEnemyWarningPulse() {
+        if (!this.enemyPulse) {
+          return;
+        }
+        this.enemyPulse.alpha = 0.14;
+        this.tweens.killTweensOf(this.enemyPulse);
+        this.tweens.add({
+          targets: this.enemyPulse,
+          alpha: { from: 0.08, to: 0.35 },
+          duration: 1000,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut'
+        });
+      }
+      applyEnemyDamage(amount) {
+        const previous = this.enemyHealth;
+        this.enemyHealth = Math.max(0, this.enemyHealth - amount);
+        if (this.enemyHealth < previous) {
+          this.flashEnemyDamage();
+          this.shakeEnemy();
+          if (this.enemyHealth === 0) {
+            this.playEnemyDestroyAnimation();
+          }
+        }
+      }
+      handleBattleAction(action) {
+        if (this.playerHealth <= 0 || this.enemyHealth <= 0) {
+          return;
+        }
+        const mission = gameState.missions[gameState.currentMission];
+        let success = false;
+        if (mission.objective === "avoidMines" && action === "Engage") {
+          success = true;
+          this.battleProgress += 1;
+          this.statusText.setText(`Progress: ${this.battleProgress} / ${this.progressTarget}`);
+          this.applyEnemyDamage(12);
+        }
+        if (mission.objective === "destroyDrone" && action === "Support") {
+          success = true;
+          this.battleProgress += 1;
+          this.applyEnemyDamage(18);
+          this.statusText.setText(`Progress: ${this.battleProgress} / ${this.progressTarget}`);
+        }
+        if (mission.objective === "scanBase" && action === "Scan") {
+          success = true;
+          this.battleProgress += 1;
+          this.applyEnemyDamage(10);
+          this.statusText.setText(`Progress: ${this.battleProgress} / ${this.progressTarget}`);
+        }
+        if (!success) {
+          soundEngine.playEffect('error');
+          this.statusText.setText("Action not optimal for the current objective.");
+        } else {
+          soundEngine.playEffect('hit');
+        }
+        this.updateBars();
+        if (this.battleProgress >= this.progressTarget || this.enemyHealth <= 0) {
+          this.battleFinish(true);
+        }
+      }
+      enemyAttack() {
+        if (this.playerHealth <= 0 || this.enemyHealth <= 0) {
+          return;
+        }
+        const damage = Phaser.Math.Between(8, 18);
+        this.playerHealth = Math.max(0, this.playerHealth - damage);
+        soundEngine.playEffect('damage');
+        this.updateBars();
+        if (this.playerHealth <= 0) {
+          this.battleFinish(false);
+        }
+      }
+      updateBars() {
+        this.playerHealthFill.width = 4.16 * this.playerHealth;
+        this.enemyHealthFill.width = 4.16 * this.enemyHealth;
+      }
+      battleFinish(success) {
+        this.battleTimer.remove(false);
+        if (success && this.playerHealth > 0) {
+          soundEngine.playEffect('victory');
+          gameState.battleSuccess = true;
+          this.add.text(520, 520, "Mission success! Transitioning to Victory.", { font: "20px Arial", fill: "#82ff9f" });
+          this.time.delayedCall(1200, () => {
+            this.scene.start("VictoryScene");
+          });
+        } else {
+          soundEngine.playEffect('error');
+          this.add.text(520, 520, "Mission failed. Retry to repair your robot.", { font: "20px Arial", fill: "#ff8a8a" });
+          const retryButton = this.add.rectangle(640, 660, 260, 70, 0xff5e5e).setOrigin(0.5).setInteractive({ useHandCursor: true });
+          this.add.text(640, 660, "Retry Mission", { font: "22px Arial", fill: "#071b31" }).setOrigin(0.5);
+          retryButton.on("pointerdown", () => {
+            this.scene.start("GarageScene");
+          });
+        }
+      }
+    }
+
+    class VictoryScene extends Phaser.Scene {
+      constructor() {
+        super("VictoryScene");
+      }
+      create() {
+        soundEngine.stopLoop();
+        soundEngine.playEffect('victory');
+        const w = this.scale.width;
+        const h = this.scale.height;
+        this.add.rectangle(0, 0, w, h, 0x08111f).setOrigin(0);
+        const mission = gameState.missions[gameState.currentMission];
+        this.add.text(w / 2, 120, "Mission Complete", { font: "52px Arial", fill: "#a2ffce" }).setOrigin(0.5);
+        this.add.text(w / 2, 200, `${mission.title} complete!`, { font: "28px Arial", fill: "#d2f7ff" }).setOrigin(0.5);
+        this.add.text(w / 2, 260, `Earned ${mission.reward} points.`, { font: "22px Arial", fill: "#d6f2ff" }).setOrigin(0.5);
+        this.add.text(w / 2, 310, `Total Score: ${gameState.score}`, { font: "22px Arial", fill: "#c3f3ff" }).setOrigin(0.5);
+        this.add.text(w / 2, 360, `Badge unlocked: ${mission.robotType} Cadet`, { font: "20px Arial", fill: "#f5ffb4" }).setOrigin(0.5);
+        const nextLabel = gameState.currentMission < gameState.missions.length - 1 ? "Next Mission" : "Final Graduation";
+        const nextButton = this.add.rectangle(w / 2, 460, 320, 80, 0x4ee1ff).setOrigin(0.5).setInteractive({ useHandCursor: true });
+        const nextText = this.add.text(w / 2, 460, nextLabel, { font: "24px Arial", fill: "#0b1f33" }).setOrigin(0.5);
+        const garageButton = this.add.rectangle(w / 2, 560, 320, 70, 0x2279a9).setOrigin(0.5).setInteractive({ useHandCursor: true });
+        const garageText = this.add.text(w / 2, 560, "Return to Garage", { font: "22px Arial", fill: "#e8f8ff" }).setOrigin(0.5);
+        nextButton.on("pointerover", () => nextButton.setFillStyle(0x72ebff));
+        nextButton.on("pointerout", () => nextButton.setFillStyle(0x4ee1ff));
+        nextButton.on("pointerdown", () => {
+          if (gameState.currentMission < gameState.missions.length - 1) {
+            gameState.currentMission += 1;
+            this.scene.start("GarageScene");
+          } else {
+            this.scene.start("FinalScene");
+          }
+        });
+        garageButton.on("pointerover", () => garageButton.setFillStyle(0x4097c3));
+        garageButton.on("pointerout", () => garageButton.setFillStyle(0x2279a9));
+        garageButton.on("pointerdown", () => {
+          this.scene.start("GarageScene");
+        });
+      }
+    }
+
+    class FinalScene extends Phaser.Scene {
+      constructor() {
+        super("FinalScene");
+      }
+      create() {
+        soundEngine.stopLoop();
+        soundEngine.playEffect('final');
+        const w = this.scale.width;
+        const h = this.scale.height;
+        this.add.rectangle(0, 0, w, h, 0x020c16).setOrigin(0);
+        this.add.rectangle(w / 2, 140, 720, 240, 0x0a1d2d, 0.92).setOrigin(0.5).setStrokeStyle(3, 0x4dd2ff);
+        this.add.text(w / 2, 80, "AFRIBOT Final Graduation", { font: "42px Arial", fill: "#a2ffce", fontStyle: "bold" }).setOrigin(0.5);
+        this.add.text(w / 2, 170, `Final Score: ${gameState.score}`, { font: "28px Arial", fill: "#d2f7ff" }).setOrigin(0.5);
+        this.add.text(w / 2, 220, "You completed the full AFRIBOT mission sequence.", { font: "20px Arial", fill: "#c3f3ff" }).setOrigin(0.5);
+        this.add.text(w / 2, 260, "Your robotics academy performance unlocked the graduation badge.", { font: "20px Arial", fill: "#c3f3ff" }).setOrigin(0.5);
+        const replayButton = this.add.rectangle(w / 2, 380, 360, 90, 0x48d7ff).setOrigin(0.5).setInteractive({ useHandCursor: true });
+        const replayText = this.add.text(w / 2, 380, "Replay Academy", { font: "26px Arial", fill: "#071b31" }).setOrigin(0.5);
+        replayButton.on("pointerover", () => replayButton.setFillStyle(0x72ecff));
+        replayButton.on("pointerout", () => replayButton.setFillStyle(0x48d7ff));
+        replayButton.on("pointerdown", () => {
+          gameState.currentMission = 0;
+          gameState.score = 0;
+          this.scene.start("MenuScene");
+        });
+      }
+    }
+
+    const config = {
+      type: Phaser.AUTO,
+      parent: "gameContainer",
+      backgroundColor: "#020409",
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 1024,
+        height: 720
+      },
+      scene: [BootScene, MenuScene, GarageScene, BattleScene, VictoryScene, FinalScene]
+    };
+
+    window.game = new Phaser.Game(config);
+
+    // Global resize handler to notify scenes
+    window.addEventListener('resize', () => {
+      if (window.game && window.game.scale) {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        try {
+          window.game.scale.resize(w, h);
+        } catch (e) {}
+      }
+    });
+
+  </script>
+</body>
+</html>
